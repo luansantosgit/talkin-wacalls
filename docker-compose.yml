@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  talkin-wacalls:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: talkin-wacalls
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - wacalls-data:/data
+    environment:
+      - WACALLS_DEBUG=${WACALLS_DEBUG:-false}
+      - WACALLS_MAX_CALLS_PER_SESSION=${WACALLS_MAX_CALLS_PER_SESSION:-8}
+    networks:
+      - talkin-network
+
+volumes:
+  wacalls-data:
+
+networks:
+  talkin-network:
+    driver: bridge
