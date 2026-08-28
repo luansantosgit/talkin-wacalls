@@ -1,38 +1,35 @@
-# Build stage
-FROM golang:1.24-alpine AS builder
+# Stage 1: Builder
+FROM golang:1.26-alpine AS builder
+
+# Instala dependências necessárias
+RUN apk add --no-cache git nodejs npm build-base python3
 
 WORKDIR /app
 
-# Install git and ca-certificates (for HTTPS connections to WhatsApp)
-RUN apk add --no-cache git ca-certificates
-
-# Copy go mod files first for caching
+# Copia arquivos de dependência primeiro (cache otimizado)
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Copy source code
+# Copia o restante do código
 COPY . .
 
-# Build the server binary
-RUN CGO_ENABLED=0 GOOS=linux go build -o /server ./cmd/server
+# Compila o frontend
+RUN cd client && npm install && npm run build
 
-# Runtime stage
-FROM alpine:3.20
+# Compila o backend Go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/server
 
-WORKDIR /app
+# Stage 2: Imagem final leve
+FROM alpine:latest
 
-# Install ca-certificates for HTTPS
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata
 
-# Copy binary from builder
-COPY --from=builder /server .
+WORKDIR /root/
 
-# Create directory for database
-RUN mkdir -p /data
+# Copia o binário compilado e os arquivos estáticos
+COPY --from=builder /app/server .
+COPY --from=builder /app/client/dist ./client/dist
 
 EXPOSE 8080
 
-VOLUME ["/data"]
-
-ENTRYPOINT ["./server"]
-CMD ["-addr", ":8080", "-db", "/data/wacalls.db"]
+CMD ["./server", "-addr", ":8080", "-static", "client/dist"]
