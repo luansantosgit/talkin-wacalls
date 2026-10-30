@@ -5,11 +5,17 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	waLog "go.mau.fi/whatsmeow/util/log"
+)
+
+const (
+	callWatchdogInterval = 30 * time.Second
+	callMaxDuration      = 60 * time.Minute
 )
 
 type SessionManager struct {
@@ -63,6 +69,12 @@ func (m *SessionManager) Get(id string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
 	return s, ok
+}
+
+func (m *SessionManager) count() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.sessions)
 }
 
 func (m *SessionManager) infos() []SessionInfo {
@@ -129,10 +141,8 @@ func (m *SessionManager) Create(name string) (string, error) {
 	s := newSession(m, id, name, client)
 	m.register(s)
 	m.broker.emitSessionList(m.infos())
-	if err := s.startPairing(m.appCtx); err != nil {
-		m.log.Error("start pairing failed", "session", id, "err", err)
-		return "", fmt.Errorf("start pairing: %w", err)
-	}
+	// Não iniciar pairing aqui: o pairing só começa quando o usuário clica em "Ativar Ligação"
+	// (chamando Pair()). Isso evita chamar startPairing duas vezes na mesma sessão.
 	m.log.Info("session created", "session", id, "name", name)
 	return id, nil
 }
@@ -184,7 +194,14 @@ func (m *SessionManager) Pair(id string) error {
 	if s.client.Store.ID != nil {
 		return fmt.Errorf("session already paired")
 	}
-	s.replaceClient(whatsmeow.NewClient(m.container.NewDevice(), m.waLogger))
+	// Deletar o device antigo (se houver) e criar um device completamente novo.
+	// Isso garante que o whatsmeow não use credenciais antigas do banco sqlstore
+	// que fazem o WhatsApp rejeitar com err-client-outdated.
+	if s.client.Store.ID != nil || s.client.Store != nil {
+		_ = m.container.DeleteDevice(m.appCtx, s.client.Store)
+	}
+	device := m.container.NewDevice()
+	s.replaceClient(whatsmeow.NewClient(device, m.waLogger))
 	if err := s.startPairing(m.appCtx); err != nil {
 		return fmt.Errorf("start pairing: %w", err)
 	}
@@ -202,5 +219,33 @@ func (m *SessionManager) disconnectAll() {
 	m.mu.RUnlock()
 	for _, s := range all {
 		s.shutdown()
+	}
+}
+
+func (m *SessionManager) startCallWatchdog() {
+	go func() {
+		ticker := time.NewTicker(callWatchdogInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-m.appCtx.Done():
+				return
+			case <-ticker.C:
+				m.cleanupOrphanedCalls()
+			}
+		}
+	}()
+}
+
+func (m *SessionManager) cleanupOrphanedCalls() {
+	m.mu.RLock()
+	all := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		all = append(all, s)
+	}
+	m.mu.RUnlock()
+
+	for _, s := range all {
+		s.cleanupOrphanedCalls()
 	}
 }

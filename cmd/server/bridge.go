@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"wacalls/internal/voip/media"
 
@@ -28,7 +29,18 @@ type Bridge struct {
 }
 
 func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
-	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{})
+	pc, err := webrtc.NewPeerConnection(webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+			{URLs: []string{"stun:stun1.l.google.com:19302"}},
+			{URLs: []string{"stun:stun2.l.google.com:19302"}},
+			{
+				URLs:       []string{"turn:187.84.150.241:3478?transport=udp", "turn:187.84.150.241:3478?transport=tcp"},
+				Username:   "talkin",
+				Credential: "talkinwacalls_secret_2026",
+			},
+		},
+	})
 	if err != nil {
 		return nil, "", err
 	}
@@ -39,6 +51,7 @@ func NewBridge(offerSDP string, log *slog.Logger) (*Bridge, string, error) {
 			return
 		}
 		br.dc.Store(dc)
+		log.Info("browser datachannel opened", "label", dc.Label())
 		dc.OnMessage(func(msg webrtc.DataChannelMessage) {
 			if cb := br.OnBrowserPCM; cb != nil && len(msg.Data) > 0 {
 				cb(media.PCMInt16LEToFloat32(msg.Data))
@@ -81,7 +94,15 @@ func (b *Bridge) WritePCM(pcm []float32) error {
 	if dc == nil || len(pcm) == 0 {
 		return nil
 	}
-	return dc.Send(media.PCMFloat32ToInt16LE(pcm))
+	data := media.PCMFloat32ToInt16LE(pcm)
+	start := time.Now()
+	err := dc.Send(data)
+	dur := time.Since(start)
+	if err != nil {
+		b.log.Debug("[AUDIO_BRIDGE] send error", "err", err, "samples", len(pcm), "bytes", len(data))
+	}
+	_ = dur
+	return err
 }
 
 func (b *Bridge) Close() {
